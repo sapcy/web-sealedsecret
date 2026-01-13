@@ -1,8 +1,11 @@
+export type SealScope = 'cluster' | 'namespace' | 'strict'
+
 export interface SealRequest {
   publicKey: string
   data: Record<string, string>
   namespace?: string
   name?: string
+  scope?: SealScope
 }
 
 export interface SealResponse {

@@ -1,4 +1,8 @@
+import { encryptValue, getSealedSecret } from '@socialgouv/aes-gcm-rsa-oaep'
 import forge from 'node-forge'
+
+// Library uses 'cluster' | 'namespace' | 'strict'
+type LibraryScope = 'cluster' | 'namespace' | 'strict'
 
 /**
  * Parse PEM-encoded certificate or public key
@@ -19,99 +23,75 @@ export function parsePublicKey(pemKey: string): forge.pki.rsa.PublicKey {
 }
 
 /**
- * Sealed Secrets uses hybrid encryption:
- * 1. Generate random 32-byte session key
- * 2. Encrypt session key with RSA-OAEP-SHA256
- * 3. Encrypt data with AES-256-GCM (including label for scope)
- * 4. Concatenate: encrypted_session_key + nonce + ciphertext + tag
+ * Encrypt a single value using @socialgouv/aes-gcm-rsa-oaep
+ * This is compatible with Kubernetes Sealed Secrets Controller
  */
-export function sealValue(
-  publicKey: forge.pki.rsa.PublicKey, 
+export async function sealValue(
+  pemKey: string, 
   value: string,
   namespace: string,
   name: string,
-  scope: 'strict' | 'namespace-wide' | 'cluster-wide' = 'strict'
-): string {
-  // Generate 32-byte session key for AES-256
-  const sessionKey = forge.random.getBytesSync(32)
-  
-  // Generate 12-byte nonce for AES-GCM
-  const nonce = forge.random.getBytesSync(12)
-  
-  // Create label based on scope
-  // strict scope: namespace/name
-  // namespace-wide scope: namespace/
-  // cluster-wide scope: empty
-  let label: string
-  switch (scope) {
-    case 'cluster-wide':
-      label = ''
-      break
-    case 'namespace-wide':
-      label = `${namespace}/`
-      break
-    case 'strict':
-    default:
-      label = `${namespace}/${name}`
-      break
-  }
-  
-  // Encrypt session key with RSA-OAEP-SHA256
-  const encryptedSessionKey = publicKey.encrypt(sessionKey, 'RSA-OAEP', {
-    md: forge.md.sha256.create(),
-    mgf1: {
-      md: forge.md.sha256.create()
-    }
+  scope: LibraryScope = 'strict'
+): Promise<string> {
+  const encrypted = await encryptValue({
+    pemKey,
+    namespace,
+    name,
+    scope,
+    value
   })
   
-  // Prepare plaintext: label (null-terminated) + value
-  // The label is used as additional authenticated data (AAD) in the original implementation
-  // but for simplicity, we'll include it in the plaintext
-  const plaintext = value
-  
-  // Create AES-GCM cipher
-  const cipher = forge.cipher.createCipher('AES-GCM', sessionKey)
-  cipher.start({
-    iv: nonce,
-    additionalData: label,
-    tagLength: 128 // 16 bytes
-  })
-  cipher.update(forge.util.createBuffer(plaintext, 'utf8'))
-  cipher.finish()
-  
-  const ciphertext = cipher.output.getBytes()
-  const tag = cipher.mode.tag.getBytes()
-  
-  // Concatenate: encrypted_session_key (256 bytes for 2048-bit RSA) + nonce (12 bytes) + ciphertext + tag (16 bytes)
-  const sealed = encryptedSessionKey + nonce + ciphertext + tag
-  
-  return forge.util.encode64(sealed)
+  return encrypted
 }
 
 /**
  * Encrypt all values in a data object
  */
-export function sealData(
-  publicKey: forge.pki.rsa.PublicKey,
+export async function sealData(
+  pemKey: string,
   data: Record<string, string>,
   namespace: string,
   name: string,
-  scope: 'strict' | 'namespace-wide' | 'cluster-wide' = 'strict'
-): Record<string, string> {
+  scope: LibraryScope = 'strict'
+): Promise<Record<string, string>> {
   const sealedData: Record<string, string> = {}
+  
   for (const [key, value] of Object.entries(data)) {
-    sealedData[key] = sealValue(publicKey, value, namespace, name, scope)
+    sealedData[key] = await sealValue(pemKey, value, namespace, name, scope)
   }
+  
   return sealedData
 }
 
 /**
- * Generate Kubernetes SealedSecret YAML
+ * Generate complete SealedSecret object using @socialgouv/aes-gcm-rsa-oaep
+ */
+export async function generateSealedSecret(
+  pemKey: string,
+  data: Record<string, string>,
+  namespace: string,
+  name: string,
+  scope: LibraryScope = 'strict'
+): Promise<object> {
+  const sealedSecret = await getSealedSecret({
+    pemKey,
+    namespace,
+    name,
+    scope,
+    values: data
+  })
+  
+  return sealedSecret
+}
+
+/**
+ * Generate Kubernetes SealedSecret YAML from sealed data
  */
 export function generateSealedSecretYAML(
   name: string,
   namespace: string,
-  sealedData: Record<string, string>
+  sealedData: Record<string, string>,
+  scope: LibraryScope = 'strict'
 ): string {
   const lines = [
     'apiVersion: bitnami.com/v1alpha1',
@@ -119,6 +99,9 @@ export function generateSealedSecretYAML(
     'metadata:',
     `  name: ${name}`,
     `  namespace: ${namespace}`,
+    '  annotations:',
+    `    sealedsecrets.bitnami.com/cluster-wide: "${scope === 'cluster'}"`,
+    `    sealedsecrets.bitnami.com/namespace-wide: "${scope === 'namespace'}"`,
     'spec:',
     '  encryptedData:',
   ]
