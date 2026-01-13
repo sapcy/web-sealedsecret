@@ -16,7 +16,7 @@ export function sealSecrets(request: SealRequest): SealResponse {
   }
 
   const publicKey = parsePublicKey(pemKey)
-  const sealedData = sealData(publicKey, data)
+  const sealedData = sealData(publicKey, data, namespace, name, 'strict')
   const resourceYAML = generateSealedSecretYAML(name, namespace, sealedData)
 
   return {
